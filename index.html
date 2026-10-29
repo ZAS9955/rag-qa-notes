@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RAG 学习问答</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --border: #e3e5ea;
+    --text: #2b2f36; --muted: #7a8190; --accent: #185fa5; --accent-bg: #e6f1fb;
+    --ok: #0f6e56; --ok-bg: #e1f5ee; --warn: #854f0b; --warn-bg: #faeeda;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.6;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 20px 16px 60px; }
+  header { padding: 8px 0 16px; }
+  header h1 { font-size: 20px; font-weight: 600; }
+  header p { color: var(--muted); font-size: 13px; margin-top: 4px; }
+  .grid { display: grid; grid-template-columns: 1fr 340px; gap: 16px; align-items: start; }
+  @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  .panel-head { padding: 10px 14px; border-bottom: 1px solid var(--border); font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 8px; }
+  .badge { font-size: 12px; font-weight: 400; padding: 1px 8px; border-radius: 10px; background: var(--accent-bg); color: var(--accent); }
+  .chat-log { padding: 14px; height: 480px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+  .msg { max-width: 88%; padding: 10px 12px; border-radius: 10px; white-space: pre-wrap; word-break: break-word; }
+  .msg.user { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 3px; }
+  .msg.bot { align-self: flex-start; background: var(--bg); border: 1px solid var(--border); border-bottom-left-radius: 3px; }
+  .msg.bot.err { background: var(--warn-bg); color: var(--warn); }
+  .msg .cite { display: block; margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); color: var(--muted); font-size: 12px; }
+  .input-bar { display: flex; gap: 8px; padding: 12px 14px; border-top: 1px solid var(--border); }
+  .input-bar textarea { flex: 1; resize: none; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font: inherit; height: 44px; }
+  .input-bar textarea:focus { outline: none; border-color: var(--accent); }
+  button { border: none; border-radius: 8px; padding: 8px 14px; font: inherit; cursor: pointer; background: var(--accent); color: #fff; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.ghost { background: var(--bg); color: var(--text); border: 1px solid var(--border); }
+  .kb-body { padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+  .stat { font-size: 13px; color: var(--muted); }
+  .stat b { color: var(--text); }
+  .hint { font-size: 12px; color: var(--muted); background: var(--ok-bg); color: var(--ok); border-radius: 8px; padding: 8px 10px; }
+  textarea.add-note { width: 100%; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font: inherit; min-height: 70px; resize: vertical; }
+  .row { display: flex; gap: 8px; }
+  .row button { flex: 1; }
+  .hits { padding: 0 14px 14px; display: flex; flex-direction: column; gap: 8px; }
+  .hit { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12px; }
+  .hit .meta { display: flex; justify-content: space-between; color: var(--muted); margin-bottom: 4px; }
+  .hit .score { color: var(--accent); font-weight: 600; }
+  .hit .txt { color: var(--text); max-height: 84px; overflow: hidden; }
+  .empty { color: var(--muted); font-size: 12px; text-align: center; padding: 8px; }
+  .loading { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--accent); border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: -1px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>RAG 学习问答 <span class="badge" id="model-badge">模型加载中…</span></h1>
+    <p>基于你的 RAG 学习笔记构建 · 检索结果实时可见，答案附来源引用</p>
+  </header>
+
+  <div class="grid">
+    <!-- 左侧：问答区 -->
+    <section class="panel">
+      <div class="panel-head">问答对话</div>
+      <div class="chat-log" id="chat-log">
+        <div class="msg bot">你好！我是你的 RAG 学习助教。知识库里有 5 篇 RAG 学习笔记，随便问我，比如「块大小一般设多少」「怎么排查幻觉」。</div>
+      </div>
+      <div class="input-bar">
+        <textarea id="q-input" placeholder="输入问题，回车发送（Shift+回车换行）"></textarea>
+        <button id="btn-send">发送</button>
+        <button id="btn-stop" class="ghost" disabled>停止</button>
+      </div>
+    </section>
+
+    <!-- 右侧：知识库 + 检索透视 -->
+    <aside style="display:flex; flex-direction:column; gap:16px;">
+      <section class="panel">
+        <div class="panel-head">知识库管理 <span class="badge" id="kb-count">…</span></div>
+        <div class="kb-body">
+          <div class="stat">知识库分块数：<b id="kb-count2">…</b> 块（块大小约 200 字，重叠 40 字）</div>
+          <div class="hint" id="kb-status">正在初始化知识库…</div>
+          <div id="admin-tools" style="display:none">
+            <textarea class="add-note" id="new-note" placeholder="往知识库添加新笔记：粘贴一段文字，会被自动分块入库"></textarea>
+            <div class="row">
+              <button id="btn-add">添加笔记</button>
+              <button id="btn-rebuild" class="ghost">重建知识库</button>
+            </div>
+          </div>
+          <div class="row">
+            <button id="btn-login" class="ghost" style="display:none">使用 WorkBuddy 登录（发布者）</button>
+            <button id="btn-logout" class="ghost" style="display:none">退出管理员</button>
+          </div>
+          <div class="stat" id="admin-note" style="text-align:center">…</div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">检索透视（本次召回了哪些块）</div>
+        <div class="hits" id="hits"><div class="empty">提问后这里会显示检索到的片段和匹配得分</div></div>
+      </section>
+    </aside>
+  </div>
+</div>
+
+<script src="./workbuddy-cloud-sdk.js"></script>
+<script src="./notes-data.js"></script>
+<script>
+  // 保险丝：核心库没加载成功时，给出看得见的提示，而不是无反应
+  window.onerror = function (msg) {
+    var log = document.getElementById('chat-log');
+    if (log && !window.WorkBuddyCloud) {
+      var div = document.createElement('div');
+      div.className = 'msg bot err';
+      div.textContent = '页面初始化失败（' + msg + '）：核心库未能加载，请检查网络后刷新重试。';
+      log.appendChild(div);
+    }
+  };
+  if (!window.WorkBuddyCloud) {
+    document.addEventListener('DOMContentLoaded', function () {
+      var log = document.getElementById('chat-log');
+      var div = document.createElement('div');
+      div.className = 'msg bot err';
+      div.textContent = '核心库（workbuddy-cloud-sdk.js）加载失败，问答功能不可用。请刷新重试，若反复出现请反馈。';
+      log.appendChild(div);
+    });
+  }
+
+  // ========== 云服务客户端初始化（配置来自云服务开通结果） ==========
+  const PUBLIC_CONFIG = {
+    endpoint: 'https://rag-qa-notes.app.workbuddy.host',
+    oauthRelayBaseUrl: 'https://www.workbuddy.cn/v2/as/genie-baas/oauth',
+    publishableKey: 'wbpk_wViqkyDShhVKEnunYT19TD_Nq2wvojhCYqLt5mtvpf3IClYFSTvfLWY',
+  };
+  const cloud = WorkBuddyCloud.createWorkBuddyCloud({
+    endpoint: PUBLIC_CONFIG.endpoint,
+    oauthRelayBaseUrl: PUBLIC_CONFIG.oauthRelayBaseUrl,
+    publishableKey: PUBLIC_CONFIG.publishableKey,
+  });
+
+  // ========== 第 1 环：分块（Chunking） ==========
+  // 按句子切分、目标块大小 CHUNK_SIZE、相邻块重叠 OVERLAP 字符
+  const CHUNK_SIZE = 200, OVERLAP = 40, TOP_K = 4;
+
+  function chunkText(text) {
+    const sentences = text.split(/(?<=[。！？；\n])/).filter(s => s.trim());
+    const chunks = [];
+    let cur = '';
+    for (const s of sentences) {
+      if (cur.length + s.length > CHUNK_SIZE && cur) {
+        chunks.push(cur.trim());
+        cur = cur.slice(-OVERLAP); // 携带上一块结尾作为重叠
+      }
+      cur += s;
+    }
+    if (cur.trim()) chunks.push(cur.trim());
+    return chunks;
+  }
+
+  // ========== 第 2 环：检索（关键词打分，教学简化版） ==========
+  // 真实 RAG 此处是"问题向量化 → 向量库近邻搜索"；无 Embedding 接口时
+  // 用词面匹配近似：中文取相邻两字（bigram），英文取整词，按 IDF 加权
+  function tokenize(text) {
+    const tokens = (text.toLowerCase().match(/[a-z0-9]+/g) || []);
+    const chars = text.match(/[\u4e00-\u9fff]/g) || [];
+    for (let i = 0; i < chars.length - 1; i++) tokens.push(chars[i] + chars[i + 1]);
+    return tokens;
+  }
+
+  function retrieve(query, chunks) {
+    const qTokens = tokenize(query);
+    if (!qTokens.length) return [];
+    const N = chunks.length;
+    const df = {}; // 包含某词的块数
+    const chunkTokens = chunks.map(c => {
+      const t = tokenize(c.content), set = new Set(t), tf = {};
+      t.forEach(x => tf[x] = (tf[x] || 0) + 1);
+      set.forEach(x => df[x] = (df[x] || 0) + 1);
+      return tf;
+    });
+    const scored = chunkTokens.map((tf, i) => {
+      let score = 0;
+      for (const t of qTokens) {
+        if (tf[t]) score += Math.log(1 + N / (df[t] || 1)) * Math.min(tf[t], 3);
+      }
+      return { ...chunks[i], score: +(score / Math.sqrt(chunks[i].content.length) * 10).toFixed(2) };
+    });
+    return scored.filter(c => c.score > 0).sort((a, b) => b.score - a.score).slice(0, TOP_K);
+  }
+
+  // ========== 知识库：读库 / 播种 / 增补 / 重建 ==========
+  async function fetchChunks() {
+    const { data, error } = await cloud.database.from('kb_chunks')
+      .select('id, doc_title, chunk_index, content').order('id');
+    if (error) throw error;
+    return data || [];
+  }
+
+  async function seedFrom(notes) {
+    const rows = [];
+    for (const note of notes) {
+      chunkText(note.content).forEach((c, i) => rows.push({ doc_title: note.title, chunk_index: i, content: c }));
+    }
+    const { error } = await cloud.database.from('kb_chunks').insert(rows);
+    if (error) throw error;
+    return rows.length;
+  }
+
+  async function refreshCount() {
+    const { count } = await cloud.database.from('kb_chunks')
+      .select('*', { count: 'exact', head: true });
+    document.getElementById('kb-count').textContent = count + ' 块';
+    document.getElementById('kb-count2').textContent = count;
+    return count;
+  }
+
+  let kbSeeding = false; // 防止登录初始化与启动初始化并发导致重复入库
+  async function initKB() {
+    if (kbSeeding) return;
+    kbSeeding = true;
+    const statusEl = document.getElementById('kb-status');
+    try {
+      let n = await refreshCount();
+      if (n === 0) {
+        if (isAdmin) {
+          statusEl.textContent = '知识库为空，正在把 5 篇笔记分块入库…';
+          n = await seedFrom(window.RAG_NOTES);
+          statusEl.textContent = '首次初始化完成：5 篇笔记切成 ' + n + ' 块入库。';
+        } else {
+          statusEl.textContent = '知识库为空：需要发布者登录后才会初始化。';
+        }
+      } else {
+        statusEl.textContent = isAdmin ? '知识库就绪。可添加笔记或重建。' : '知识库就绪。访客可提问，编辑需发布者登录。';
+      }
+    } catch (e) {
+      statusEl.textContent = '知识库初始化失败：' + (e.message || e);
+      statusEl.style.background = 'var(--warn-bg)'; statusEl.style.color = 'var(--warn)';
+    } finally {
+      kbSeeding = false;
+    }
+  }
+
+  document.getElementById('btn-add').onclick = async () => {
+    const text = document.getElementById('new-note').value.trim();
+    if (!text) return alert('请先粘贴要入库的笔记内容');
+    const btn = document.getElementById('btn-add'); btn.disabled = true;
+    try {
+      const chunks = chunkText(text);
+      const { error } = await cloud.database.from('kb_chunks')
+        .insert(chunks.map((c, i) => ({ doc_title: '手工添加', chunk_index: i, content: c })));
+      if (error) throw error;
+      document.getElementById('new-note').value = '';
+      await refreshCount();
+      addMsg('bot', '已把新笔记切成 ' + chunks.length + ' 块加入知识库，现在可以就这个话题提问了。');
+    } catch (e) { addMsg('bot', '入库失败：' + (e.message || e), true); }
+    btn.disabled = false;
+  };
+
+  document.getElementById('btn-rebuild').onclick = async () => {
+    if (!confirm('重建知识库会先清空现有全部分块，再从 5 篇内置笔记重新分块入库。确定继续？')) return;
+    const btn = document.getElementById('btn-rebuild'); btn.disabled = true;
+    try {
+      await cloud.database.from('kb_chunks').delete().neq('id', 0);
+      const n = await seedFrom(window.RAG_NOTES);
+      await refreshCount();
+      addMsg('bot', '知识库已重建，当前 ' + n + ' 块。');
+    } catch (e) { addMsg('bot', '重建失败：' + (e.message || e), true); }
+    btn.disabled = false;
+  };
+
+  // ========== 第 3 环：生成（检索片段拼进 Prompt，流式输出） ==========
+  let modelId = null, busy = false, controller = null;
+
+  async function pickModel() {
+    const models = await cloud.llm.models.list();
+    const m = models.find(x => x.disabled !== true);
+    if (!m) throw new Error('当前没有可用模型（模型列表为空）');
+    modelId = m.id;
+    document.getElementById('model-badge').textContent = m.name || m.id;
+  }
+
+  function addMsg(role, text, isErr) {
+    const log = document.getElementById('chat-log');
+    const div = document.createElement('div');
+    div.className = 'msg ' + role + (isErr ? ' err' : '');
+    div.textContent = text;
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+    return div;
+  }
+
+  async function ask(question) {
+    if (busy || !question.trim()) return;
+    busy = true;
+    document.getElementById('btn-send').disabled = true;
+    document.getElementById('btn-stop').disabled = false;
+    addMsg('user', question);
+
+    const botDiv = addMsg('bot', '');
+    try {
+      // --- 检索 ---
+      botDiv.textContent = '正在检索知识库…';
+      const chunks = await fetchChunks();
+      const hits = retrieve(question, chunks);
+      renderHits(hits);
+      if (!hits.length) {
+        botDiv.textContent = '知识库里没有找到与这个问题相关的内容。可以换个问法，或把相关笔记添加进知识库。';
+        return;
+      }
+      // --- 拼接上下文 ---
+      const context = hits.map((h, i) =>
+        '[片段' + (i + 1) + '｜来源：' + h.doc_title + ']\n' + h.content).join('\n\n');
+      botDiv.innerHTML = '<span class="loading"></span> 已召回 ' + hits.length + ' 个片段，生成回答中…';
+      // --- 流式生成 ---
+      controller = new AbortController();
+      let answer = '';
+      for await (const chunk of cloud.llm.chat.completions.create({
+        model: modelId,
+        messages: [
+          { role: 'system', content: '你是一个 RAG 知识学习助教。请只根据用户提供的资料片段回答问题，'
+            + '用简体中文，条理清晰。如果资料中没有答案，就明确说"知识库中没有相关内容"，不要编造。'
+            + '回答末尾用一行注明引用了哪些片段，格式如：（引用：片段1、片段3）' },
+          { role: 'user', content: '资料片段：\n' + context + '\n\n问题：' + question },
+        ],
+        stream: true,
+        temperature: 0.2,
+        signal: controller.signal,
+      })) {
+        const delta = chunk.choices[0]?.delta;
+        if (delta?.content) {
+          answer += delta.content;
+          botDiv.textContent = answer;
+          document.getElementById('chat-log').scrollTop = 1e9;
+        }
+      }
+      // --- 引用溯源 ---
+      const cite = document.createElement('span');
+      cite.className = 'cite';
+      cite.textContent = '来源：' + [...new Set(hits.map(h => h.doc_title))].join('、')
+        + '（共 ' + hits.length + ' 个片段，见右侧检索透视）';
+      botDiv.appendChild(cite);
+    } catch (e) {
+      if (e.name === 'AbortError') {
+        botDiv.textContent = botDiv.textContent + '\n（已停止生成）';
+      } else {
+        const msg = e.error?.code === 'quota_rate_limited'
+          ? '额度暂时受限，请稍后重试。'
+          : (e.error?.message || e.message || String(e));
+        botDiv.textContent = '出错了：' + msg;
+      }
+    } finally {
+      busy = false; controller = null;
+      document.getElementById('btn-send').disabled = false;
+      document.getElementById('btn-stop').disabled = true;
+    }
+  }
+
+  function renderHits(hits) {
+    const box = document.getElementById('hits');
+    box.innerHTML = '';
+    if (!hits.length) { box.innerHTML = '<div class="empty">没有命中任何片段</div>'; return; }
+    for (const h of hits) {
+      const div = document.createElement('div');
+      div.className = 'hit';
+      const meta = document.createElement('div'); meta.className = 'meta';
+      meta.innerHTML = '<span>' + h.doc_title + ' · 第' + (h.chunk_index + 1) + '块</span>'
+        + '<span class="score">得分 ' + h.score + '</span>';
+      const txt = document.createElement('div'); txt.className = 'txt'; txt.textContent = h.content;
+      div.appendChild(meta); div.appendChild(txt);
+      box.appendChild(div);
+    }
+  }
+
+  // ========== 权限：发布者登录（WorkBuddy 账号）后才能编辑知识库 ==========
+  let isAdmin = false;
+
+  function renderAuth(session) {
+    isAdmin = !!(session && session.user);
+    document.getElementById('admin-tools').style.display = isAdmin ? 'block' : 'none';
+    document.getElementById('btn-login').style.display = isAdmin ? 'none' : 'block';
+    document.getElementById('btn-logout').style.display = isAdmin ? 'block' : 'none';
+    document.getElementById('admin-note').textContent = isAdmin
+      ? '管理员模式：已登录 ' + (session.user.name || '发布者')
+      : '访客模式：可提问，编辑知识库需发布者登录';
+    if (isAdmin) initKB(); // 登录后若知识库为空则立即初始化
+  }
+
+  document.getElementById('btn-login').onclick = async () => {
+    // 回调地址必须是站点根路径，并保留业务参数（如 sharecode）
+    const back = new URL(location.href);
+    back.pathname = '/';
+    for (const k of ['code', 'state', 'provider']) back.searchParams.delete(k);
+    const { data, error } = await cloud.auth.signInWithOAuth({
+      provider: 'workbuddy',
+      redirectTo: back.toString(),
+    });
+    if (error) {
+      addMsg('bot', '登录失败：' + error.message
+        + (String(error.message).includes('未打开') ? '（请到 WorkBuddy 云服务管理页开启本应用的 WorkBuddy 登录开关）' : ''), true);
+    } else {
+      location.assign(data.url); // 同标签页跳转，PKCE 校验要求
+    }
+  };
+
+  document.getElementById('btn-logout').onclick = async () => {
+    const { error } = await cloud.auth.signOut();
+    if (error) addMsg('bot', '退出失败：' + error.message, true);
+  };
+
+  // 启动时先处理登录回调（必须在其它逻辑之前），再恢复会话
+  async function restoreAuth() {
+    const url = new URL(location.href);
+    if (url.searchParams.has('code') || url.searchParams.has('error')) {
+      const provider = url.searchParams.get('provider');
+      if (provider === 'workbuddy') {
+        const { data: session, error } = await cloud.auth.handleWorkBuddyCallback.call(cloud.auth);
+        if (error) {
+          addMsg('bot', '登录回调失败：' + error.message, true);
+        } else if (session) {
+          for (const k of ['code', 'state', 'provider']) url.searchParams.delete(k);
+          history.replaceState(null, '', url.pathname + url.search + url.hash);
+        }
+      } else if (url.searchParams.has('error')) {
+        addMsg('bot', '授权回调缺少有效的登录方式，请重新登录。', true);
+      }
+    }
+    const { data: session } = await cloud.auth.getSession();
+    renderAuth(session);
+    cloud.auth.onAuthStateChange((event, s) => {
+      if (event === 'SIGNED_OUT' || !s || !s.user) renderAuth(null);
+    });
+  }
+
+  // ========== 事件绑定与启动 ==========
+  document.getElementById('btn-send').onclick = () => {
+    const input = document.getElementById('q-input');
+    ask(input.value); input.value = '';
+  };
+  document.getElementById('btn-stop').onclick = () => controller && controller.abort();
+  document.getElementById('q-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); document.getElementById('btn-send').click(); }
+  });
+
+  (async () => {
+    await restoreAuth();
+    await initKB();
+    try { await pickModel(); }
+    catch (e) { document.getElementById('model-badge').textContent = '模型不可用'; addMsg('bot', '模型加载失败：' + (e.message || e), true); }
+  })();
+</script>
+</body>
+</html>
